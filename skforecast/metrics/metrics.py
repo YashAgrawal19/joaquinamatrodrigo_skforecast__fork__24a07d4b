@@ -17,6 +17,41 @@ from sklearn.metrics import (
     mean_squared_log_error,
 )
 
+def _handle_nan_metric(func: Callable) -> Callable:
+    """
+    Wrap a metric function to handle NaN values by ignoring them.
+    """
+    @wraps(func)
+    def wrapper(y_true, y_pred, *args, **kwargs):
+        # Convert inputs to numpy arrays if they're pandas Series
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        
+        # Find valid indices (not NaN in either array)
+        valid_mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+        
+        # If all values are NaN, return NaN
+        if not np.any(valid_mask):
+            return np.nan
+        
+        # Filter out NaN values
+        y_true_valid = y_true[valid_mask]
+        y_pred_valid = y_pred[valid_mask]
+        
+        # Handle y_train if it's in kwargs
+        if 'y_train' in kwargs and kwargs['y_train'] is not None:
+            y_train = np.asarray(kwargs['y_train'])
+            if isinstance(y_train, list):
+                # For list of time series, filter NaN from each series
+                y_train = [np.asarray(x)[~np.isnan(x)] for x in y_train]
+            else:
+                y_train = y_train[~np.isnan(y_train)]
+            kwargs['y_train'] = y_train
+        
+        return func(y_true_valid, y_pred_valid, *args, **kwargs)
+    
+    return wrapper
+
 def _get_metric(metric: str) -> Callable:
     """
     Get the corresponding scikit-learn function to calculate the metric.
@@ -53,7 +88,9 @@ def _get_metric(metric: str) -> Callable:
         "root_mean_squared_scaled_error": root_mean_squared_scaled_error,
     }
 
-    metric = add_y_train_argument(metrics[metric])
+    # First wrap the metric to handle NaN values, then add y_train argument
+    metric = _handle_nan_metric(metrics[metric])
+    metric = add_y_train_argument(metric)
 
     return metric
 
@@ -141,12 +178,37 @@ def mean_absolute_scaled_error(
     if len(y_true) == 0 or len(y_pred) == 0:
         raise ValueError("y_true and y_pred must have at least one element")
 
-    if isinstance(y_train, list):
-        naive_forecast = np.concatenate([np.diff(x) for x in y_train])
-        mase = np.mean(np.abs(y_true - y_pred)) / np.mean(np.abs(naive_forecast))
+    # Convert inputs to numpy arrays
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    # Find valid indices (not NaN in either array)
+    valid_mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    
+    # If all values are NaN, return NaN
+    if not np.any(valid_mask):
+        return np.nan
+    
+    # Filter out NaN values
+    y_true_valid = y_true[valid_mask]
+    y_pred_valid = y_pred[valid_mask]
 
+    if isinstance(y_train, list):
+        # Filter NaN from each training series
+        y_train_filtered = [np.asarray(x)[~np.isnan(x)] for x in y_train]
+        naive_forecast = np.concatenate([np.diff(x) for x in y_train_filtered])
+        # Remove any NaN that might have been created by diff
+        naive_forecast = naive_forecast[~np.isnan(naive_forecast)]
+        if len(naive_forecast) == 0:
+            return np.nan
+        mase = np.mean(np.abs(y_true_valid - y_pred_valid)) / np.mean(np.abs(naive_forecast))
     else:
-        mase = np.mean(np.abs(y_true - y_pred)) / np.mean(np.abs(np.diff(y_train)))
+        y_train = np.asarray(y_train)
+        y_train_valid = y_train[~np.isnan(y_train)]
+        if len(y_train_valid) < 2:  # Need at least 2 points to calculate diff
+            return np.nan
+        naive_forecast = np.diff(y_train_valid)
+        mase = np.mean(np.abs(y_true_valid - y_pred_valid)) / np.mean(np.abs(naive_forecast))
 
     return mase
 
@@ -202,10 +264,36 @@ def root_mean_squared_scaled_error(
     if len(y_true) == 0 or len(y_pred) == 0:
         raise ValueError("y_true and y_pred must have at least one element")
 
+    # Convert inputs to numpy arrays
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    # Find valid indices (not NaN in either array)
+    valid_mask = ~(np.isnan(y_true) | np.isnan(y_pred))
+    
+    # If all values are NaN, return NaN
+    if not np.any(valid_mask):
+        return np.nan
+    
+    # Filter out NaN values
+    y_true_valid = y_true[valid_mask]
+    y_pred_valid = y_pred[valid_mask]
+
     if isinstance(y_train, list):
-        naive_forecast = np.concatenate([np.diff(x) for x in y_train])
-        rmsse = np.sqrt(np.mean((y_true - y_pred) ** 2)) / np.sqrt(np.mean(naive_forecast ** 2))
+        # Filter NaN from each training series
+        y_train_filtered = [np.asarray(x)[~np.isnan(x)] for x in y_train]
+        naive_forecast = np.concatenate([np.diff(x) for x in y_train_filtered])
+        # Remove any NaN that might have been created by diff
+        naive_forecast = naive_forecast[~np.isnan(naive_forecast)]
+        if len(naive_forecast) == 0:
+            return np.nan
+        rmsse = np.sqrt(np.mean((y_true_valid - y_pred_valid) ** 2)) / np.sqrt(np.mean(naive_forecast ** 2))
     else:
-        rmsse = np.sqrt(np.mean((y_true - y_pred) ** 2)) / np.sqrt(np.mean(np.diff(y_train) ** 2))
+        y_train = np.asarray(y_train)
+        y_train_valid = y_train[~np.isnan(y_train)]
+        if len(y_train_valid) < 2:  # Need at least 2 points to calculate diff
+            return np.nan
+        naive_forecast = np.diff(y_train_valid)
+        rmsse = np.sqrt(np.mean((y_true_valid - y_pred_valid) ** 2)) / np.sqrt(np.mean(naive_forecast ** 2))
     
     return rmsse
